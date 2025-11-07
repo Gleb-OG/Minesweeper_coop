@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Сапёр на двоих 💣 PRO</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { margin:0; font-family: Arial; background:#111; color:#fff; text-align:center; }
+    #container { padding:10px; }
+    .board { display:grid; gap:2px; background:#333; padding:10px; border-radius:10px; margin:20px auto; }
+    .cell { background:#666; cursor:pointer; font-weight:bold; display:flex; align-items:center; justify-content:center; user-select:none; }
+    .open { background:#222; cursor:default; }
+    .flag { background:#d44 !important; }
+    .bomb { background:#f00; animation: pulse 0.5s; }
+    @keyframes pulse { 50% { transform:scale(1.2); } }
+    .progress { font-size:20px; margin:10px; }
+    #chat { width:90%; max-width:600px; height:120px; background:#222; overflow-y:scroll; padding:10px; border-radius:10px; margin:auto; }
+    #controls { margin:15px; }
+    .win { color:#0f0; font-size:40px; animation:blink 1s infinite; }
+    @keyframes blink { 50% { opacity:0.5; } }
+    #soundBtn { font-size:30px; cursor:pointer; position:fixed; top:10px; right:10px; z-index:100; }
+  </style>
+</head>
+<body>
+  <div id="soundBtn" onclick="toggleSound()">🔊</div>
+  <div id="container">
+    <h1>Сапёр на двоих 💣 PRO</h1>
+    <div id="setup" style="margin:20px;">
+      <input id="username" placeholder="Твоё имя" value="Профи">
+      <select id="sizeSelect">
+        <option value="8">8×8 (лёгкий)</option>
+        <option value="10" selected>10×10 (классика)</option>
+        <option value="16">16×16 (про)</option>
+        <option value="20">20×20 (хардкор)</option>
+      </select>
+      <button onclick="init()">Создать / Войти</button>
+    </div>
+    <div>Комната: <span id="roomId">...</span> | 
+         Размер: <span id="gridSize">10×10</span> | 
+         Мин: <span id="mineCount">15</span></div>
+    <div>Ссылка: <span id="link" style="color:#0f0"></span></div>
+    
+    <div style="display:flex; flex-wrap:wrap; justify-content:center; gap:20px;">
+      <div>
+        <div>Ты (<span id="myName"></span>): <span id="myProgress">0% (00:00)</span></div>
+        <div id="myBoard" class="board"></div>
+      </div>
+      <div>
+        <div>Оппонент: <span id="oppProgress">0% (00:00)</span></div>
+        <div id="oppBoard" class="board"></div>
+      </div>
+    </div>
+
+    <div class="progress" id="status">Ожидание второго игрока...</div>
+    <div id="win"></div>
+
+    <div id="chat"></div>
+    <input id="msg" placeholder="Чат: gg wp..." onkeypress="if(event.key==='Enter')sendMsg()">
+    <button onclick="sendMsg()">Отправить</button>
+  </div>
+
+  <audio id="clickSound" src="https://assets.mixkit.co/sfx/preview/mixkit-arcade-game-jump-coin-216.mp3"></audio>
+  <audio id="flagSound" src="https://assets.mixkit.co/sfx/preview/mixkit-select-click-1239.mp3"></audio>
+  <audio id="boomSound" src="https://assets.mixkit.co/sfx/preview/mixkit-explosion-1675.mp3"></audio>
+  <audio id="winSound" src="https://assets.mixkit.co/sfx/preview/mixkit-winning-chimes-2015.mp3"></audio>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    const params = new URLSearchParams(location.search);
+    let room = params.get('room') || 'main';
+    let gridSize = parseInt(params.get('size')) || 10;
+    let mineCount = params.get('mines') || (gridSize === 8 ? 10 : gridSize === 10 ? 15 : gridSize === 16 ? 40 : 80);
+    let username = '';
+    let myBoard = [], oppBoard = [];
+    let gameStarted = false;
+    let safeCells = gridSize * gridSize - mineCount;
+    let startTime = 0;
+    let timerInterval;
+    let soundEnabled = localStorage.getItem('minesweeperSound') !== 'off';
+
+    const clickSound = document.getElementById('clickSound');
+    const flagSound = document.getElementById('flagSound');
+    const boomSound = document.getElementById('boomSound');
+    const winSound = document.getElementById('winSound');
+
+    function play(sound) {
+      if (soundEnabled) {
+        sound.currentTime = 0;
+        sound.play().catch(() => {});
+      }
+    }
+
+    function toggleSound() {
+      soundEnabled = !soundEnabled;
+      localStorage.setItem('minesweeperSound', soundEnabled ? 'on' : 'off');
+      document.getElementById('soundBtn').textContent = soundEnabled ? '🔊' : '🔈';
+    }
+
+    document.getElementById('soundBtn').textContent = soundEnabled ? '🔊' : '🔈';
+    document.getElementById('roomId').innerText = room;
+    document.getElementById('link').innerText = location.href;
+    document.getElementById('sizeSelect').value = gridSize;
+
+    function init() {
+      gridSize = parseInt(document.getElementById('sizeSelect').value);
+      mineCount = gridSize === 8 ? 10 : gridSize === 10 ? 15 : gridSize === 16 ? 40 : 80;
+      safeCells = gridSize * gridSize - mineCount;
+      document.getElementById('gridSize').innerText = gridSize + '×' + gridSize;
+      document.getElementById('mineCount').innerText = mineCount;
+      username = document.getElementById('username').value || 'Аноним';
+      document.getElementById('myName').innerText = username;
+      document.getElementById('setup').style.display = 'none';
+
+      // Обновляем URL без перезагрузки
+      const newUrl = `${location.origin}${location.pathname}?room=${room}&size=${gridSize}&mines=${mineCount}`;
+      history.replaceState(null, '', newUrl);
+      document.getElementById('link').innerText = newUrl;
+
+      socket.emit('join', room, username, gridSize, mineCount);
+    }
+
+    socket.on('start', (data) => {
+      gameStarted = true;
+      startTime = Date.now();
+      timerInterval = setInterval(updateTimer, 1000);
+      document.getElementById('status').innerHTML = 'Игра началась! Первый клик — безопасный!';
+      generateBoard('myBoard', true);
+      generateBoard('oppBoard', false);
+      document.getElementById('win').innerHTML = '';
+    });
+
+    function updateTimer() {
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      const mins = String(Math.floor(elapsed / 60)).padStart(2, '0');
+      const secs = String(elapsed % 60).padStart(2, '0');
+      document.getElementById('myProgress').innerText = document.getElementById('myProgress').innerText.split(' (')[0] + ` (${mins}:${secs})`;
+    }
+
+    socket.on('update', (data) => {
+      document.getElementById('oppProgress').innerText = data.oppProgress + '% (' + data.oppTime + ')';
+      renderOppBoard(data.oppVisible);
+      if (data.winner) {
+        clearInterval(timerInterval);
+        document.getElementById('win').innerHTML = `<div class="win">🎉 ПОБЕДИЛ ${data.winner} за ${data.winTime}!</div>`;
+        play(winSound);
+        gameStarted = false;
+      }
+    });
+
+    socket.on('chat', (msg) => {
+      const div = document.createElement('div');
+      div.innerHTML = `<b>${msg.user}:</b> ${msg.text}`;
+      document.getElementById('chat').appendChild(div);
+      div.scrollIntoView();
+    });
+
+    function generateBoard(boardId, isMine) {
+      const board = document.getElementById(boardId);
+      board.innerHTML = '';
+      board.style.gridTemplateColumns = `repeat(${gridSize}, ${isMine ? 35 : 30}px)`;
+      const cellSize = isMine ? 35 : 30;
+      const arr = [];
+      for (let i = 0; i < gridSize; i++) {
+        arr[i] = [];
+        for (let j = 0; j < gridSize; j++) {
+          const cell = document.createElement('div');
+          cell.className = 'cell';
+          cell.style.width = cell.style.height = cellSize + 'px';
+          cell.style.fontSize = gridSize > 16 ? '12px' : '16px';
+          cell.dataset.x = i; cell.dataset.y = j;
+          if (isMine) {
+            cell.onclick = () => openCell(i, j);
+            cell.oncontextmenu = (e) => { e.preventDefault(); flagCell(i, j); };
+          }
+          board.appendChild(cell);
+          arr[i][j] = { mine: false, open: false, flag: false, num: 0 };
+        }
+      }
+      if (isMine) myBoard = arr; else oppBoard = arr;
+      if (isMine) placeMines();
+    }
+
+    function placeMines() {
+      let placed = 0;
+      while (placed < mineCount) {
+        const x = Math.floor(Math.random()*gridSize);
+        const y = Math.floor(Math.random()*gridSize);
+        if (!myBoard[x][y].mine) {
+          myBoard[x][y].mine = true;
+          placed++;
+        }
+      }
+      calculateNumbers();
+    }
+
+    function calculateNumbers() {
+      for (let i = 0; i < gridSize; i++)
+        for (let j = 0; j < gridSize; j++)
+          if (!myBoard[i][j].mine) {
+            let count = 0;
+            for (let di = -1; di <= 1; di++)
+              for (let dj = -1; dj <= 1; dj++) {
+                const ni = i + di, nj = j + dj;
+                if (ni >= 0 && ni < gridSize && nj >= 0 && nj < gridSize && myBoard[ni][nj].mine) count++;
+              }
+            myBoard[i][j].num = count;
+          }
+    }
+
+    let firstClick = true;
+    function openCell(x, y) {
+      if (!gameStarted || myBoard[x][y].open || myBoard[x][y].flag) return;
+      if (firstClick) {
+        firstClick = false;
+        while (myBoard[x][y].mine || hasAdjacentMine(x, y)) {
+          myBoard.forEach(row => row.forEach(cell => cell.mine = false));
+          placeMines();
+        }
+      }
+      if (myBoard[x][y].mine) {
+        explode();
+        return;
+      }
+      play(clickSound);
+      floodFill(x, y);
+      updateProgress();
+    }
+
+    function hasAdjacentMine(x, y) {
+      for (let di = -1; di <= 1; di++)
+        for (let dj = -1; dj <= 1; dj++) {
+          const ni = x + di, nj = y + dj;
+          if (ni >= 0 && ni < gridSize && nj >= 0 && nj < gridSize && myBoard[ni][nj].mine) return true;
+        }
+      return false;
+    }
+
+    function floodFill(x, y) {
+      if (x < 0 || x >= gridSize || y < 0 || y >= gridSize || myBoard[x][y].open || myBoard[x][y].flag) return;
+      myBoard[x][y].open = true;
+      const cell = document.querySelector(`#myBoard .cell[data-x="${x}"][data-y="${y}"]`);
+      cell.classList.add('open');
+      if (myBoard[x][y].num > 0) {
+        cell.innerText = myBoard[x][y].num;
+        cell.style.color = ['blue','green','red','purple','black','gray','pink','orange'][myBoard[x][y].num-1];
+      } else {
+        for (let di = -1; di <= 1; di++)
+          for (let dj = -1; dj <= 1; dj++)
+            floodFill(x + di, y + dj);
+      }
+    }
+
+    function flagCell(x, y) {
+      if (!gameStarted || myBoard[x][y].open) return;
+      myBoard[x][y].flag = !myBoard[x][y].flag;
+      const cell = document.querySelector(`#myBoard .cell[data-x="${x}"][data-y="${y}"]`);
+      cell.classList.toggle('flag');
+      cell.innerText = myBoard[x][y].flag ? '🚩' : '';
+      play(flagSound);
+      updateProgress();
+    }
+
+    function updateProgress() {
+      let opened = 0;
+      myBoard.flat().forEach(c => { if (c.open && !c.mine) opened++; });
+      const percent = Math.round(opened / safeCells * 100);
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      const timeStr = String(Math.floor(elapsed / 60)).padStart(2, '0') + ':' + String(elapsed % 60).padStart(2, '0');
+      document.getElementById('myProgress').innerText = percent + '% (' + timeStr + ')';
+      socket.emit('progress', { room, percent, time: timeStr, board: getVisibleBoard() });
+      if (opened === safeCells) {
+        const winTime = timeStr;
+        socket.emit('win', room, winTime);
+      }
+    }
+
+    function getVisibleBoard() {
+      return myBoard.map(row => row.map(c => ({ open: c.open && !c.mine, num: c.open ? c.num : -1, flag: c.flag })));
+    }
+
+    function renderOppBoard(visible) {
+      for (let i = 0; i < gridSize; i++)
+        for (let j = 0; j < gridSize; j++) {
+          const cell = document.querySelector(`#oppBoard .cell[data-x="${i}"][data-y="${j}"]`);
+          if (!cell) continue;
+          if (visible[i][j].open) {
+            cell.classList.add('open');
+            cell.innerText = visible[i][j].num > 0 ? visible[i][j].num : '';
+            if (visible[i][j].num > 0) cell.style.color = ['blue','green','red','purple','black','gray','pink','orange'][visible[i][j].num-1];
+          } else if (visible[i][j].flag) {
+            cell.classList.add('flag');
+            cell.innerText = '🚩';
+          } else {
+            cell.classList.remove('open', 'flag');
+            cell.innerText = '';
+          }
+        }
+    }
+
+    function explode() {
+      play(boomSound);
+      myBoard.flat().forEach((c, idx) => {
+        if (c.mine) {
+          const x = Math.floor(idx / gridSize), y = idx % gridSize;
+          const cell = document.querySelector(`#myBoard .cell[data-x="${x}"][data-y="${y}"]`);
+          if (cell) {
+            cell.classList.add('bomb');
+            cell.innerText = '💣';
+          }
+        }
+      });
+      document.getElementById('status').innerHTML = '<span style="color:red">💥 ВЗРЫВ! Ты проиграл!</span>';
+      gameStarted = false;
+      clearInterval(timerInterval);
+    }
+
+    function sendMsg() {
+      const input = document.getElementById('msg');
+      if (input.value.trim()) {
+        socket.emit('chat', { room, user: username, text: input.value });
+        input.value = '';
+      }
+    }
+
+    // Автостарт
+    window.onload = () => {
+      const savedName = localStorage.getItem('minesweeperName') || '';
+      if (savedName) document.getElementById('username').value = savedName;
+      if (params.get('room') || params.get('size')) {
+        username = prompt("Твоё имя?", savedName || "Игрок"+Math.floor(Math.random()*1000)) || "Аноним";
+        document.getElementById('username').value = username;
+        localStorage.setItem('minesweeperName', username);
+        init();
+      }
+    };
+  </script>
+</body>
+</html>
